@@ -5,15 +5,15 @@ from pathlib import Path
 import PyPDF2
 from io import BytesIO
 
-# Simple embedding and similarity search using sentence-transformers
+# Simple text search using TF-IDF (no complex dependencies)
 try:
-    from sentence_transformers import SentenceTransformer
-    import numpy as np
+    from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.metrics.pairwise import cosine_similarity
-    EMBEDDINGS_AVAILABLE = True
+    import numpy as np
+    SEARCH_AVAILABLE = True
 except ImportError:
-    EMBEDDINGS_AVAILABLE = False
-    st.error("Please install required packages: sentence-transformers, scikit-learn")
+    SEARCH_AVAILABLE = False
+    st.error("Please install required packages: scikit-learn")
 
 # Optional: OpenAI for better responses (falls back to simple retrieval if not available)
 try:
@@ -35,13 +35,13 @@ st.markdown("Upload PDFs, ask questions, get answers with optional summaries!")
 # Initialize session state
 if 'documents' not in st.session_state:
     st.session_state.documents = []
-if 'embeddings' not in st.session_state:
-    st.session_state.embeddings = []
-if 'model' not in st.session_state:
-    if EMBEDDINGS_AVAILABLE:
-        st.session_state.model = SentenceTransformer('all-MiniLM-L6-v2')
+if 'vectorizer' not in st.session_state:
+    if SEARCH_AVAILABLE:
+        st.session_state.vectorizer = TfidfVectorizer(stop_words='english', max_features=1000)
     else:
-        st.session_state.model = None
+        st.session_state.vectorizer = None
+if 'doc_vectors' not in st.session_state:
+    st.session_state.doc_vectors = None
 
 def extract_text_from_pdf(pdf_file):
     """Extract text from PDF file"""
@@ -66,31 +66,32 @@ def chunk_text(text, chunk_size=1000, overlap=200):
         start = end - overlap
     return chunks
 
-def create_embeddings(chunks):
-    """Create embeddings for text chunks"""
-    if not st.session_state.model:
-        return []
+def create_document_vectors(chunks):
+    """Create TF-IDF vectors for text chunks"""
+    if not st.session_state.vectorizer or not chunks:
+        return None
     
     try:
-        embeddings = st.session_state.model.encode(chunks)
-        return embeddings
+        vectors = st.session_state.vectorizer.fit_transform(chunks)
+        return vectors
     except Exception as e:
-        st.error(f"Error creating embeddings: {str(e)}")
-        return []
+        st.error(f"Error creating document vectors: {str(e)}")
+        return None
 
 def find_relevant_chunks(query, top_k=3):
-    """Find most relevant chunks for the query"""
-    if not st.session_state.embeddings or not st.session_state.model:
+    """Find most relevant chunks for the query using TF-IDF"""
+    if st.session_state.doc_vectors is None or not st.session_state.vectorizer:
         return []
     
     try:
-        query_embedding = st.session_state.model.encode([query])
-        similarities = cosine_similarity(query_embedding, st.session_state.embeddings)[0]
+        # Transform query using the fitted vectorizer
+        query_vector = st.session_state.vectorizer.transform([query])
+        similarities = cosine_similarity(query_vector, st.session_state.doc_vectors)[0]
         top_indices = np.argsort(similarities)[-top_k:][::-1]
         
         relevant_chunks = []
         for idx in top_indices:
-            if similarities[idx] > 0.3:  # Minimum similarity threshold
+            if similarities[idx] > 0.1:  # Minimum similarity threshold
                 relevant_chunks.append({
                     'text': st.session_state.documents[idx],
                     'similarity': similarities[idx]
@@ -185,14 +186,14 @@ with col1:
     
     if uploaded_files:
         if st.button("Process Documents", type="primary"):
-            if not EMBEDDINGS_AVAILABLE:
-                st.error("Sentence transformers not available. Please check requirements.")
+            if not SEARCH_AVAILABLE:
+                st.error("Text search not available. Please check requirements.")
                 st.stop()
             
             with st.spinner("Processing documents..."):
                 # Clear previous data
                 st.session_state.documents = []
-                st.session_state.embeddings = []
+                st.session_state.doc_vectors = None
                 
                 # Process each file
                 for uploaded_file in uploaded_files:
@@ -204,20 +205,14 @@ with col1:
                         # Chunk text
                         chunks = chunk_text(text)
                         st.session_state.documents.extend(chunks)
-                        
-                        # Create embeddings
-                        embeddings = create_embeddings(chunks)
-                        if len(embeddings) > 0:
-                            if len(st.session_state.embeddings) == 0:
-                                st.session_state.embeddings = embeddings
-                            else:
-                                st.session_state.embeddings = np.vstack([st.session_state.embeddings, embeddings])
-                        
                         st.success(f"✅ {uploaded_file.name} processed ({len(chunks)} chunks)")
                     else:
                         st.warning(f"⚠️ No text extracted from {uploaded_file.name}")
                 
-                st.success(f"🎉 Processing complete! Total chunks: {len(st.session_state.documents)}")
+                # Create document vectors for all chunks
+                if st.session_state.documents:
+                    st.session_state.doc_vectors = create_document_vectors(st.session_state.documents)
+                    st.success(f"🎉 Processing complete! Total chunks: {len(st.session_state.documents)}")
 
 with col2:
     st.header("❓ Ask Questions")
